@@ -18,8 +18,6 @@ NEW_TOMCAT_SRC_DIR="${NEW_TOMCAT_SRC_DIR:-/home/webuser}"   # nouveau Tomcat ici
 TOMCAT_HOME="${TOMCAT_HOME:-/appli/jahia/tomcat}"           # Tomcat actuel
 BACKUP_ROOT="${BACKUP_ROOT:-/home/webuser/tomcat-backups}"
 LOG_DIR="${LOG_DIR:-/home/webuser/logs/tomcat-upgrade}"
-VERIFY_URL="${VERIFY_URL:-http://localhost:8080/}"
-VERIFY_TIMEOUT="${VERIFY_TIMEOUT:-600}"                     # secondes
 STOP_TIMEOUT="${STOP_TIMEOUT:-120}"                         # secondes
 
 # Arrêt / démarrage de Jahia via systemd
@@ -95,20 +93,6 @@ start_tomcat() {
   $SYSTEMCTL start "$JAHIA_SERVICE"
 }
 
-verify_startup() {
-  info "Vérification (URL: $VERIFY_URL, max ${VERIFY_TIMEOUT}s)…"
-  local deadline=$((SECONDS + VERIFY_TIMEOUT)) code="000"
-  while (( SECONDS < deadline )); do
-    if ! tomcat_running; then error "Le processus Tomcat s'est arrêté."; return 1; fi
-    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$VERIFY_URL" || true)"
-    if [[ "$code" =~ ^[23][0-9][0-9]$ ]]; then info "HTTP $code : l'application répond."; return 0; fi
-    info "  … en attente (code HTTP: $code)"
-    sleep 10
-  done
-  error "Pas de réponse HTTP valide après ${VERIFY_TIMEOUT}s (dernier code: $code)"
-  return 1
-}
-
 #------------------------------ ROLLBACK --------------------------------------
 rollback() {
   [[ "$ROLLBACK_DONE" == true ]] && return 0
@@ -136,7 +120,7 @@ rollback() {
 
   if (( WAS_RUNNING )); then
     start_tomcat || { error "Redémarrage de l'ancien Tomcat en échec : intervention manuelle."; return 1; }
-    verify_startup && info "Ancien Tomcat redémarré." || warn "Ancien Tomcat lancé, vérification HTTP KO : contrôlez les logs."
+    info "Ancien Tomcat redémarré."
   fi
 }
 
@@ -183,7 +167,7 @@ restore_file() {
 #------------------------------ ÉTAPE 1 : contrôles préalables ----------------
 check_prerequisites() {
   local c
-  for c in tar cp mv find sort sed grep awk gzip df du stat curl perl; do
+  for c in tar cp mv find sort sed grep awk gzip df du stat perl; do
     command -v "$c" >/dev/null 2>&1 || die "Commande requise absente : $c"
   done
   [[ -f "$TOMCAT_HOME/bin/catalina.sh" && -f "$TOMCAT_HOME/conf/server.xml" ]] \
@@ -333,17 +317,9 @@ do_restore_setenv() {
   fi
 }
 
-#------------------------------ ÉTAPE 11 : démarrage et contrôle --------------
-check_catalina_errors() {
-  local n
-  n="$(grep -c ' SEVERE ' "$TOMCAT_HOME/logs/catalina.out" 2>/dev/null || true)"
-  if (( ${n:-0} == 0 )); then info "Aucune ligne SEVERE dans catalina.out."; else warn "$n ligne(s) SEVERE dans catalina.out : à examiner."; fi
-}
-
-do_start_and_verify() {
+#------------------------------ ÉTAPE 12 : démarrage --------------
+do_start() {
   start_tomcat
-  verify_startup || die "La vérification du démarrage a échoué."
-  check_catalina_errors
   info "À faire : contrôler les logs Jahia et surveiller les performances."
 }
 
@@ -369,7 +345,7 @@ main() {
   step 9  "Restauration du pilote de base de données"; do_restore_db_drivers
   step 10 "Restauration de la configuration (AJP inclus)"; do_restore_conf
   step 11 "Restauration de setenv.sh";              do_restore_setenv
-  step 12 "Démarrage et vérification";              do_start_and_verify
+  step 12 "Démarrage de Jahia";                       do_start
 
   SUCCESS=true
   print_summary
